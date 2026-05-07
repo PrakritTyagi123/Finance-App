@@ -9,13 +9,6 @@
   /* ============================================================
      CONSTANTS
      ============================================================ */
-  const STORAGE_KEYS = {
-    accounts:     'khata_accounts',
-    transactions: 'khata_transactions',
-    budgets:      'khata_budgets',
-    settings:     'khata_settings'
-  };
-
   const CATEGORIES = {
     expense: [
       { name: 'Food',          icon: '🍛', color: '#B23A2E' },
@@ -113,21 +106,149 @@
   }[c]));
 
   /* ============================================================
-     STORAGE
+     SQLITE DATABASE (sql.js / WebAssembly)
      ============================================================ */
-  const Storage = {
-    save(key, data) {
-      try { localStorage.setItem(key, JSON.stringify(data)); }
-      catch (e) { console.warn('Storage save failed', e); }
+  const DB_FILE_NAME = 'khata-finance.db';
+  const SQL_WASM_URL = 'https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/';
+
+  let SQL;
+  let db;
+
+  const parseJsonArray = (value) => {
+    try {
+      const parsed = JSON.parse(value || '[]');
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (e) {
+      return [];
+    }
+  };
+
+  const queryRows = (sql, params = []) => {
+    const stmt = db.prepare(sql);
+    const rows = [];
+    try {
+      stmt.bind(params);
+      while (stmt.step()) rows.push(stmt.getAsObject());
+    } finally {
+      stmt.free();
+    }
+    return rows;
+  };
+
+  const queryOne = (sql, params = []) => queryRows(sql, params)[0] || null;
+
+  const execute = (sql, params = []) => {
+    const stmt = db.prepare(sql);
+    try {
+      stmt.run(params);
+    } finally {
+      stmt.free();
+    }
+  };
+
+  const mapAccountRow = (row) => ({
+    id: row.id,
+    name: row.name,
+    type: row.type,
+    balance: Number(row.balance) || 0,
+    minBalance: Number(row.minBalance) || 0,
+    createdAt: Number(row.createdAt) || 0
+  });
+
+  const mapTransactionRow = (row) => ({
+    id: row.id,
+    type: row.type,
+    amount: Number(row.amount) || 0,
+    category: row.category,
+    accountId: row.accountId,
+    tags: parseJsonArray(row.tags),
+    note: row.note || '',
+    timestamp: Number(row.timestamp) || 0,
+    flagged: Boolean(row.flagged),
+    flagReasons: parseJsonArray(row.flagReasons)
+  });
+
+  async function initDb(databaseFile) {
+    if (!SQL) {
+      if (typeof initSqlJs !== 'function') {
+        throw new Error('sql.js failed to load. Check your network connection and reload.');
+      }
+      SQL = await initSqlJs({ locateFile: file => SQL_WASM_URL + file });
+    }
+
+    db = databaseFile ? new SQL.Database(databaseFile) : new SQL.Database();
+    db.run(`
+      PRAGMA foreign_keys = ON;
+
+      CREATE TABLE IF NOT EXISTS accounts (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        type TEXT NOT NULL,
+        balance REAL NOT NULL DEFAULT 0,
+        minBalance REAL NOT NULL DEFAULT 0,
+        createdAt INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS transactions (
+        id TEXT PRIMARY KEY,
+        type TEXT NOT NULL CHECK (type IN ('income', 'expense')),
+        amount REAL NOT NULL CHECK (amount > 0),
+        category TEXT NOT NULL,
+        accountId TEXT NOT NULL,
+        tags TEXT NOT NULL DEFAULT '[]',
+        note TEXT NOT NULL DEFAULT '',
+        timestamp INTEGER NOT NULL,
+        flagged INTEGER NOT NULL DEFAULT 0,
+        flagReasons TEXT NOT NULL DEFAULT '[]',
+        FOREIGN KEY (accountId) REFERENCES accounts(id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_transactions_timestamp ON transactions(timestamp DESC);
+      CREATE INDEX IF NOT EXISTS idx_transactions_type ON transactions(type);
+      CREATE INDEX IF NOT EXISTS idx_transactions_category ON transactions(category);
+      CREATE INDEX IF NOT EXISTS idx_transactions_account ON transactions(accountId);
+
+      CREATE TABLE IF NOT EXISTS budgets (
+        category TEXT PRIMARY KEY,
+        limitAmount REAL NOT NULL CHECK (limitAmount > 0)
+      );
+    `);
+    return db;
+  }
+
+  const DatabaseFiles = {
+    save() {
+      if (!db) return;
+      const bytes = db.export();
+      const blob = new Blob([bytes], { type: 'application/vnd.sqlite3' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = DB_FILE_NAME;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      Toast.show('SQLite database saved to file', 'success');
     },
-    load(key, fallback) {
-      try {
-        const raw = localStorage.getItem(key);
-        return raw ? JSON.parse(raw) : fallback;
-      } catch (e) { return fallback; }
+
+    async load(file) {
+      if (!file) return;
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      await initDb(bytes);
+      State.hydrate();
+      Insights.generate();
+      UI.render();
+      Toast.show(`Loaded ${file.name}`, 'success');
     },
-    clearAll() {
-      Object.values(STORAGE_KEYS).forEach(k => localStorage.removeItem(k));
+
+    reset() {
+      db.run(`
+        DELETE FROM transactions;
+        DELETE FROM budgets;
+        DELETE FROM accounts;
+      `);
+      State.hydrate();
     }
   };
 
@@ -142,16 +263,13 @@
     filters: { type: '', category: '', account: '', search: '', tag: '' },
     activeView: 'overview',
 
-    persist() {
-      Storage.save(STORAGE_KEYS.accounts, this.accounts);
-      Storage.save(STORAGE_KEYS.transactions, this.transactions);
-      Storage.save(STORAGE_KEYS.budgets, this.budgets);
-    },
-
     hydrate() {
-      this.accounts = Storage.load(STORAGE_KEYS.accounts, []);
-      this.transactions = Storage.load(STORAGE_KEYS.transactions, []);
-      this.budgets = Storage.load(STORAGE_KEYS.budgets, {});
+      this.accounts = queryRows('SELECT * FROM accounts ORDER BY createdAt ASC').map(mapAccountRow);
+      this.transactions = queryRows('SELECT * FROM transactions ORDER BY timestamp DESC, id DESC').map(mapTransactionRow);
+      this.budgets = Object.fromEntries(
+        queryRows('SELECT category, limitAmount FROM budgets ORDER BY category ASC')
+          .map(row => [row.category, Number(row.limitAmount) || 0])
+      );
     }
   };
 
@@ -168,23 +286,35 @@
         minBalance: Number(minBalance) || 0,
         createdAt: Date.now()
       };
-      State.accounts.push(acc);
-      State.persist();
+      execute(
+        `INSERT INTO accounts (id, name, type, balance, minBalance, createdAt)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [acc.id, acc.name, acc.type, acc.balance, acc.minBalance, acc.createdAt]
+      );
+      State.hydrate();
       return acc;
     },
     update(id, patch) {
-      const idx = State.accounts.findIndex(a => a.id === id);
-      if (idx === -1) return null;
-      State.accounts[idx] = { ...State.accounts[idx], ...patch };
-      State.persist();
-      return State.accounts[idx];
+      const existing = this.getById(id);
+      if (!existing) return null;
+      const next = { ...existing, ...patch };
+      execute(
+        `UPDATE accounts
+         SET name = ?, type = ?, balance = ?, minBalance = ?
+         WHERE id = ?`,
+        [next.name.trim(), next.type, Number(next.balance) || 0, Number(next.minBalance) || 0, id]
+      );
+      State.hydrate();
+      return this.getById(id);
     },
     delete(id) {
-      State.accounts = State.accounts.filter(a => a.id !== id);
-      State.transactions = State.transactions.filter(t => t.accountId !== id);
-      State.persist();
+      execute('DELETE FROM accounts WHERE id = ?', [id]);
+      State.hydrate();
     },
-    getById(id) { return State.accounts.find(a => a.id === id); },
+    getById(id) {
+      const row = queryOne('SELECT * FROM accounts WHERE id = ?', [id]);
+      return row ? mapAccountRow(row) : null;
+    },
     isLow(acc) { return acc.minBalance > 0 && acc.balance < acc.minBalance; },
     isNear(acc) { return acc.minBalance > 0 && !this.isLow(acc) && acc.balance < acc.minBalance * 1.25; },
     healthRatio(acc) {
@@ -213,91 +343,164 @@
         flagged: false,
         flagReasons: []
       };
-      if (type === 'income') account.balance += tx.amount;
-      else account.balance -= tx.amount;
 
       const flags = FraudDetector.check(tx);
       if (flags.length) { tx.flagged = true; tx.flagReasons = flags; }
 
-      State.transactions.unshift(tx);
-      if (State.transactions.length > 1000) {
-        State.transactions = State.transactions.slice(0, 1000);
+      db.run('BEGIN TRANSACTION');
+      try {
+        execute(
+          `INSERT INTO transactions
+           (id, type, amount, category, accountId, tags, note, timestamp, flagged, flagReasons)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            tx.id, tx.type, tx.amount, tx.category, tx.accountId,
+            JSON.stringify(tx.tags), tx.note, tx.timestamp,
+            tx.flagged ? 1 : 0, JSON.stringify(tx.flagReasons)
+          ]
+        );
+        execute(
+          `UPDATE accounts
+           SET balance = balance + ?
+           WHERE id = ?`,
+          [tx.type === 'income' ? tx.amount : -tx.amount, tx.accountId]
+        );
+        db.run(`
+          DELETE FROM transactions
+          WHERE id NOT IN (
+            SELECT id FROM transactions ORDER BY timestamp DESC, id DESC LIMIT 1000
+          )
+        `);
+        db.run('COMMIT');
+      } catch (e) {
+        db.run('ROLLBACK');
+        throw e;
       }
-      State.persist();
+
+      State.hydrate();
       return tx;
     },
     delete(id) {
-      const tx = State.transactions.find(t => t.id === id);
+      const tx = queryOne('SELECT * FROM transactions WHERE id = ?', [id]);
       if (!tx) return;
-      const acc = Accounts.getById(tx.accountId);
-      if (acc) {
-        if (tx.type === 'income') acc.balance -= tx.amount;
-        else acc.balance += tx.amount;
+      const amount = Number(tx.amount) || 0;
+      db.run('BEGIN TRANSACTION');
+      try {
+        execute(
+          `UPDATE accounts
+           SET balance = balance + ?
+           WHERE id = ?`,
+          [tx.type === 'income' ? -amount : amount, tx.accountId]
+        );
+        execute('DELETE FROM transactions WHERE id = ?', [id]);
+        db.run('COMMIT');
+      } catch (e) {
+        db.run('ROLLBACK');
+        throw e;
       }
-      State.transactions = State.transactions.filter(t => t.id !== id);
-      State.persist();
+      State.hydrate();
     },
     filtered() {
       const f = State.filters;
+      const where = [];
+      const params = [];
       const search = f.search.trim().toLowerCase();
-      return State.transactions.filter(t => {
-        if (f.type && t.type !== f.type) return false;
-        if (f.category && t.category !== f.category) return false;
-        if (f.account && t.accountId !== f.account) return false;
-        if (f.tag && !t.tags.includes(f.tag)) return false;
-        if (search) {
-          const hay = (t.category + ' ' + (t.note || '') + ' ' + t.tags.join(' ')).toLowerCase();
-          if (!hay.includes(search)) return false;
-        }
-        return true;
-      });
+
+      if (f.type) { where.push('type = ?'); params.push(f.type); }
+      if (f.category) { where.push('category = ?'); params.push(f.category); }
+      if (f.account) { where.push('accountId = ?'); params.push(f.account); }
+      if (f.tag) { where.push('LOWER(tags) LIKE ?'); params.push(`%"${f.tag.toLowerCase()}"%`); }
+      if (search) {
+        where.push('(LOWER(category) LIKE ? OR LOWER(note) LIKE ? OR LOWER(tags) LIKE ?)');
+        params.push(`%${search}%`, `%${search}%`, `%${search}%`);
+      }
+
+      const sql = `
+        SELECT * FROM transactions
+        ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+        ORDER BY timestamp DESC, id DESC
+      `;
+      return queryRows(sql, params).map(mapTransactionRow);
+    },
+    count() {
+      return Number(queryOne('SELECT COUNT(*) AS count FROM transactions')?.count) || 0;
+    },
+    recent(limit = 5) {
+      return queryRows('SELECT * FROM transactions ORDER BY timestamp DESC, id DESC LIMIT ?', [limit]).map(mapTransactionRow);
     },
     totalsThisMonth() {
       const ms = startOfMonth();
-      let income = 0, expense = 0;
-      State.transactions.forEach(t => {
-        if (t.timestamp < ms) return;
-        if (t.type === 'income') income += t.amount;
-        else expense += t.amount;
-      });
+      const row = queryOne(
+        `SELECT
+           COALESCE(SUM(CASE WHEN type = 'income' THEN amount ELSE 0 END), 0) AS income,
+           COALESCE(SUM(CASE WHEN type = 'expense' THEN amount ELSE 0 END), 0) AS expense
+         FROM transactions
+         WHERE timestamp >= ?`,
+        [ms]
+      );
+      const income = Number(row?.income) || 0;
+      const expense = Number(row?.expense) || 0;
       return { income, expense, net: income - expense };
     },
     byCategoryThisMonth(type = 'expense') {
       const ms = startOfMonth();
-      const map = {};
-      State.transactions.forEach(t => {
-        if (t.type !== type || t.timestamp < ms) return;
-        map[t.category] = (map[t.category] || 0) + t.amount;
-      });
-      return map;
+      return Object.fromEntries(
+        queryRows(
+          `SELECT category, SUM(amount) AS total
+           FROM transactions
+           WHERE type = ? AND timestamp >= ?
+           GROUP BY category
+           ORDER BY total DESC`,
+          [type, ms]
+        ).map(row => [row.category, Number(row.total) || 0])
+      );
     },
     last14Days() {
       const days = 14;
       const today = startOfDay(Date.now());
+      const firstDay = today - (days - 1) * 86400000;
       const buckets = [];
+      const byDay = new Map();
       for (let i = days - 1; i >= 0; i--) {
-        buckets.push({ day: today - i * 86400000, income: 0, expense: 0 });
+        const bucket = { day: today - i * 86400000, income: 0, expense: 0 };
+        buckets.push(bucket);
+        byDay.set(bucket.day, bucket);
       }
-      State.transactions.forEach(t => {
-        const d = startOfDay(t.timestamp);
-        const b = buckets.find(b => b.day === d);
-        if (b) {
-          if (t.type === 'income') b.income += t.amount;
-          else b.expense += t.amount;
+
+      queryRows(
+        `SELECT
+           ((timestamp / 86400000) * 86400000) AS day,
+           COALESCE(SUM(CASE WHEN type = 'income' THEN amount ELSE 0 END), 0) AS income,
+           COALESCE(SUM(CASE WHEN type = 'expense' THEN amount ELSE 0 END), 0) AS expense
+         FROM transactions
+         WHERE timestamp >= ?
+         GROUP BY day
+         ORDER BY day ASC`,
+        [firstDay]
+      ).forEach(row => {
+        const day = Number(row.day);
+        const bucket = byDay.get(day);
+        if (bucket) {
+          bucket.income = Number(row.income) || 0;
+          bucket.expense = Number(row.expense) || 0;
         }
       });
       return buckets;
     },
     dailyAverage30Days() {
       const cutoff = Date.now() - 30 * 86400000;
-      const expenses = State.transactions.filter(t => t.type === 'expense' && t.timestamp >= cutoff);
-      if (!expenses.length) return 0;
-      const total = expenses.reduce((s, t) => s + t.amount, 0);
-      return total / 30;
+      const row = queryOne(
+        `SELECT COALESCE(SUM(amount), 0) AS total
+         FROM transactions
+         WHERE type = 'expense' AND timestamp >= ?`,
+        [cutoff]
+      );
+      return (Number(row?.total) || 0) / 30;
     },
     allTags() {
       const map = {};
-      State.transactions.forEach(t => t.tags.forEach(tag => { map[tag] = (map[tag] || 0) + 1; }));
+      queryRows('SELECT tags FROM transactions WHERE tags <> ? ORDER BY timestamp DESC', ['[]'])
+        .forEach(row => parseJsonArray(row.tags).forEach(tag => { map[tag] = (map[tag] || 0) + 1; }));
       return Object.entries(map).sort((a, b) => b[1] - a[1]).slice(0, 16).map(e => e[0]);
     }
   };
@@ -309,22 +512,27 @@
     set(category, limit) {
       const v = Number(limit);
       if (!category || !v || v <= 0) return;
-      State.budgets[category] = v;
-      State.persist();
+      execute(
+        `INSERT INTO budgets (category, limitAmount)
+         VALUES (?, ?)
+         ON CONFLICT(category) DO UPDATE SET limitAmount = excluded.limitAmount`,
+        [category, v]
+      );
+      State.hydrate();
     },
     remove(category) {
-      delete State.budgets[category];
-      State.persist();
+      execute('DELETE FROM budgets WHERE category = ?', [category]);
+      State.hydrate();
     },
     spent(category) {
       const ms = startOfMonth();
-      let total = 0;
-      State.transactions.forEach(t => {
-        if (t.type === 'expense' && t.category === category && t.timestamp >= ms) {
-          total += t.amount;
-        }
-      });
-      return total;
+      const row = queryOne(
+        `SELECT COALESCE(SUM(amount), 0) AS total
+         FROM transactions
+         WHERE type = 'expense' AND category = ? AND timestamp >= ?`,
+        [category, ms]
+      );
+      return Number(row?.total) || 0;
     },
     status(category) {
       const limit = State.budgets[category] || 0;
@@ -740,7 +948,7 @@
     renderRecent() {
       const list = document.getElementById('recentTxList');
       if (!list) return;
-      const recent = State.transactions.slice(0, 5);
+      const recent = Transactions.recent(5);
       if (!recent.length) {
         list.innerHTML = '<div class="empty">No transactions yet. Tap <b>+ Add</b> to begin.</div>';
         return;
@@ -752,11 +960,11 @@
     renderTransactions() {
       const list = document.getElementById('txList');
       const total = document.getElementById('txTotal');
-      if (total) total.textContent = State.transactions.length;
+      if (total) total.textContent = Transactions.count();
       if (!list) return;
       const txs = Transactions.filtered();
       if (!txs.length) {
-        if (!State.transactions.length) {
+        if (!Transactions.count()) {
           list.innerHTML = `
             <div class="empty large">
               <div class="empty-mark">·</div>
@@ -919,7 +1127,7 @@
       const catSel = document.getElementById('filterCategory');
       const accSel = document.getElementById('filterAccount');
       if (catSel) {
-        const cats = [...new Set(State.transactions.map(t => t.category))].sort();
+        const cats = queryRows('SELECT DISTINCT category FROM transactions ORDER BY category ASC').map(row => row.category);
         const cur = State.filters.category;
         catSel.innerHTML = '<option value="">All categories</option>' +
           cats.map(c => `<option value="${escapeHtml(c)}" ${c === cur ? 'selected' : ''}>${escapeHtml(c)}</option>`).join('');
@@ -1077,11 +1285,28 @@
       Modals.openTransaction();
     });
 
+    // ----- SQLite file import / export -----
+    const saveDbBtn = document.getElementById('saveDbBtn');
+    if (saveDbBtn) saveDbBtn.addEventListener('click', () => DatabaseFiles.save());
+
+    const loadDbInput = document.getElementById('loadDbInput');
+    if (loadDbInput) loadDbInput.addEventListener('change', async (e) => {
+      const file = e.target.files?.[0];
+      try {
+        await DatabaseFiles.load(file);
+      } catch (err) {
+        console.error(err);
+        Toast.show('Could not load that SQLite file', 'error');
+      } finally {
+        e.target.value = '';
+      }
+    });
+
     // ----- Reset -----
     document.getElementById('resetDataBtn').addEventListener('click', () => {
       if (!confirm('Reset everything? This will permanently delete all your accounts, transactions, and budgets.')) return;
-      Storage.clearAll();
-      State.accounts = []; State.transactions = []; State.budgets = {}; State.insights = [];
+      DatabaseFiles.reset();
+      State.insights = [];
       Insights.generate();
       UI.render();
       Toast.show('Reset complete', 'success');
@@ -1269,7 +1494,8 @@
   /* ============================================================
      INIT
      ============================================================ */
-  function init() {
+  async function init() {
+    await initDb();
     State.hydrate();
     Insights.generate();
     wireEvents();
@@ -1281,10 +1507,15 @@
     }
   }
 
+  const startApp = () => init().catch(err => {
+    console.error(err);
+    document.body.insertAdjacentHTML('afterbegin', '<div class="empty large">Could not start the SQLite database. Please reload and try again.</div>');
+  });
+
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', init);
+    document.addEventListener('DOMContentLoaded', startApp);
   } else {
-    init();
+    startApp();
   }
 
 })();
