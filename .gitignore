@@ -1,0 +1,210 @@
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# =========================
+# Virtual Environments
+# =========================
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# =========================
+# Flask
+# =========================
+instance/
+.webassets-cache/
+
+# Flask session files
+flask_session/
+
+# =========================
+# SQLite / Database
+# =========================
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+
+# Keep schema example if needed
+#!khata.db
+
+# =========================
+# Environment Variables
+# =========================
+.env
+.env.*
+!.env.example
+
+# =========================
+# Logs
+# =========================
+*.log
+logs/
+*.out
+*.err
+
+# =========================
+# Coverage / Testing
+# =========================
+.coverage
+.coverage.*
+.cache/
+.pytest_cache/
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+htmlcov/
+
+# =========================
+# Type Checkers / Linters
+# =========================
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.ruff_cache/
+.pytype/
+
+# =========================
+# Jupyter
+# =========================
+.ipynb_checkpoints
+
+# =========================
+# VS Code
+# =========================
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+
+# =========================
+# JetBrains
+# =========================
+.idea/
+*.iml
+
+# =========================
+# macOS
+# =========================
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# =========================
+# Windows
+# =========================
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# =========================
+# Linux
+# =========================
+*~
+
+# =========================
+# Node / Frontend
+# =========================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Build outputs
+coverage/
+.cache-loader/
+.eslintcache
+
+# =========================
+# Temporary Files
+# =========================
+tmp/
+temp/
+*.tmp
+*.swp
+*.swo
+
+# =========================
+# Backup Files
+# =========================
+*.bak
+*.backup
+*.old
+
+# =========================
+# Runtime / Local Data
+# =========================
+data/
+exports/
+imports/
+uploads/
+backups/
+
+# =========================
+# Generated Reports
+# =========================
+reports/
+analytics_exports/
+
+# =========================
+# OS-generated files
+# =========================
+Icon?
+.Spotlight-V100
+.Trashes
+
+# =========================
+# Optional:
+# Uncomment if you want
+# to ignore generated assets
+# =========================
+
+# static/build/
+# static/dist/
+# static/generated/
+
+# =========================
+# Keep Important Empty Dirs
+# =========================
+!.gitkeep
